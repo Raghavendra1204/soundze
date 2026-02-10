@@ -1,0 +1,217 @@
+
+from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+from dotenv import load_dotenv
+import os
+import requests
+
+# FORCE load .env
+load_dotenv(dotenv_path=".env", override=True)
+
+# Load credentials from environment variables
+CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
+
+print("DEBUG CLIENT ID :", CLIENT_ID)
+print("DEBUG REDIRECT  :", REDIRECT_URI)
+
+app = FastAPI()
+
+# Store access token temporarily (in production, use a database)
+user_tokens = {}
+
+
+@app.get("/")
+def root():
+    return {"status": "backend running"}
+
+
+@app.get("/login")
+def login():
+    # Added more scopes for richer data access
+    spotify_auth_url = (
+        "https://accounts.spotify.com/authorize"
+        f"?client_id={CLIENT_ID}"
+        "&response_type=code"
+        f"&redirect_uri={REDIRECT_URI}"
+        "&scope=user-read-private user-read-email playlist-read-private user-top-read user-read-recently-played"
+    )
+    return RedirectResponse(spotify_auth_url)
+
+
+@app.get("/callback")
+def callback(code: str = None, error: str = None):
+    if error:
+        return {"error": error}
+
+    # Exchange code for access token
+    token_url = "https://accounts.spotify.com/api/token"
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET
+    }
+    token_response = requests.post(token_url, data=data).json()
+    access_token = token_response.get("access_token")
+
+    if not access_token:
+        return {"error": "Failed to get access token", "details": token_response}
+
+    # Fetch user profile
+    headers = {"Authorization": f"Bearer {access_token}"}
+    user_info = requests.get("https://api.spotify.com/v1/me", headers=headers).json()
+    
+    user_id = user_info.get("id")
+    
+    # Store token for this user (temporary - use DB in production)
+    user_tokens[user_id] = access_token
+
+    return {
+        "message": "Spotify login successful!",
+        "user_id": user_id,
+        "user_info": user_info,
+        "next_steps": "Use /top-tracks, /audio-features, or /recently-played with your user_id"
+    }
+
+
+# 🎵 NEW ENDPOINT: Get your top tracks
+@app.get("/top-tracks/{user_id}")
+def get_top_tracks(user_id: str, time_range: str = "medium_term", limit: int = 20):
+    """"
+    Get user's top tracks - this shows what you actually like!
+    
+    time_range options:
+    - short_term: last 4 weeks
+    - medium_term: last 6 months (default)
+    - long_term: all time
+    
+    This is GOLD for building your taste profile.
+    """
+    access_token = user_tokens.get(user_id)
+    if not access_token:
+        return {"error": "User not logged in"}
+    
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"https://api.spotify.com/v1/me/top/tracks?time_range={time_range}&limit={limit}"
+    response = requests.get(url, headers=headers).json()
+    
+    # Simplify the response to just the important stuff
+    tracks = []
+    for item in response.get("items", []):
+        tracks.append({
+            "id": item["id"],
+            "name": item["name"],
+            "artist": item["artists"][0]["name"],
+            "popularity": item["popularity"],
+            "preview_url": item.get("preview_url")
+        })
+    
+    return {
+        "time_range": time_range,
+        "total": len(tracks),
+        "tracks": tracks
+    }
+
+
+# 🎹 NEW ENDPOINT: Get audio features (THE ML GOLDMINE)
+@app.get("/audio-features/{user_id}")
+def get_audio_features(user_id: str, track_ids: str = None):
+    """
+    Get audio features for tracks - this is where ML magic happens!
+    
+    Features include:
+    - danceability (0-1): How suitable for dancing
+    - energy (0-1): Intensity and activity
+    - valence (0-1): Musical positiveness (happy vs sad)
+    - tempo: BPM
+    - acousticness, instrumentalness, speechiness, etc.
+    
+    Usage: /audio-features/your_user_id?track_ids=id1,id2,id3
+    
+    Tip: First get track IDs from /top-tracks, then analyze them here!
+    """
+    access_token = user_tokens.get(user_id)
+    if not access_token:
+        return {"error": "User not logged in"}
+    
+    if not track_ids:
+        return {"error": "Please provide track_ids as comma-separated list"}
+    
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"https://api.spotify.com/v1/audio-features?ids={track_ids}"
+    response = requests.get(url, headers=headers).json()
+    
+    return response
+
+
+# 🕐 NEW ENDPOINT: Recently played tracks
+@app.get("/recently-played/{user_id}")
+def get_recently_played(user_id: str, limit: int = 20):
+    """
+    Get your listening history - shows actual behavior patterns.
+    This is different from top tracks - it's chronological listening.
+    """
+    access_token = user_tokens.get(user_id)
+    if not access_token:
+        return {"error": "User not logged in"}
+    
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"https://api.spotify.com/v1/me/player/recently-played?limit={limit}"
+    response = requests.get(url, headers=headers).json()
+    
+    # Simplify response
+    tracks = []
+    for item in response.get("items", []):
+        track = item["track"]
+        tracks.append({
+            "played_at": item["played_at"],
+            "track_id": track["id"],
+            "name": track["name"],
+            "artist": track["artists"][0]["name"]
+        })
+    
+    return {
+        "total": len(tracks),
+        "tracks": tracks
+    }
+
+
+# 🔍 NEW ENDPOINT: Get track recommendations
+@app.get("/recommendations/{user_id}")
+def get_recommendations(user_id: str, seed_tracks: str = None, limit: int = 10):
+    """
+    Get Spotify's AI recommendations based on seed tracks.
+    
+    This uses Spotify's own recommendation engine - we'll build our own later!
+    But good to understand how they do it.
+    
+    Usage: /recommendations/your_user_id?seed_tracks=id1,id2,id3
+    """
+    access_token = user_tokens.get(user_id)
+    if not access_token:
+        return {"error": "User not logged in"}
+    
+    if not seed_tracks:
+        return {"error": "Please provide seed_tracks as comma-separated list (max 5)"}
+    
+    headers = {"Authorization": f"Bearer {access_token}"}
+    url = f"https://api.spotify.com/v1/recommendations?seed_tracks={seed_tracks}&limit={limit}"
+    response = requests.get(url, headers=headers).json()
+    
+    # Simplify response
+    recommendations = []
+    for track in response.get("tracks", []):
+        recommendations.append({
+            "id": track["id"],
+            "name": track["name"],
+            "artist": track["artists"][0]["name"],
+            "preview_url": track.get("preview_url")
+        })
+    
+    return {
+        "seed_tracks": seed_tracks.split(","),
+        "recommendations": recommendations
+    }
