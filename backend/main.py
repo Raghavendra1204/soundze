@@ -252,13 +252,13 @@ def spotify_callback(code: str = None, state: str = None, error: str = None):
     conn = sqlite3.connect('music_app.db')
     cursor = conn.cursor()
     token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-    
     try:
         cursor.execute('''
             INSERT INTO spotify_accounts 
             (user_id, spotify_user_id, access_token, refresh_token, token_expires_at)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(spotify_user_id) DO UPDATE SET 
+                user_id = excluded.user_id,  -- 🌟 THIS IS THE NEW LINE!
                 access_token = excluded.access_token,
                 refresh_token = excluded.refresh_token,
                 token_expires_at = excluded.token_expires_at
